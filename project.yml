@@ -1,0 +1,24 @@
+name: AVE2Lab
+options:
+  bundleIdPrefix: org.research
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    PRODUCT_NAME: AVE2Lab
+    PRODUCT_BUNDLE_IDENTIFIER: org.research.ave2lab
+    INFOPLIST_FILE: AVE2Lab/Info.plist
+    GENERATE_INFOPLIST_FILE: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGNING_ALLOWED: NO
+targets:
+  AVE2Lab:
+    type: application
+    platform: iOS
+    sources:
+      - path: AVE2Lab
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.research.ave2lab
+        INFOPLIST_FILE: AVE2Lab/Info.plist
+        CODE_SIGNING_ALLOWED: NO
