@@ -7,6 +7,7 @@
 #import <fcntl.h>
 #import <errno.h>
 #import <string.h>
+#import <stdint.h>
 
 @interface ViewController ()
 
@@ -56,6 +57,8 @@ static void OutputCallback(void *refCon,
 
 @implementation ViewController
 
+#pragma mark - View setup
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
@@ -65,7 +68,7 @@ static void OutputCallback(void *refCon,
     self.runButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.runButton.translatesAutoresizingMaskIntoConstraints = NO;
 
-    [self.runButton setTitle:@"Run Privilege + Encoder Tests"
+    [self.runButton setTitle:@"Run AVE2 Diagnostics"
                     forState:UIControlStateNormal];
 
     self.runButton.titleLabel.font =
@@ -123,7 +126,7 @@ static void OutputCallback(void *refCon,
     struct utsname systemInfo;
     uname(&systemInfo);
 
-    [self log:@"AVE2Lab privilege diagnostic build"];
+    [self log:@"AVE2Lab - AppleAVE2 Research Harness"];
     [self log:[NSString stringWithFormat:
                @"OS: %@",
                NSProcessInfo.processInfo.operatingSystemVersionString]];
@@ -132,15 +135,22 @@ static void OutputCallback(void *refCon,
                @"Device identifier: %s",
                systemInfo.machine]];
 
-    [self log:@"Read-only privilege checks; no exploit attempted."];
+    [self log:@"Diagnostic mode: public API reachability and read-only checks."];
+    [self log:@"No exploit attempted."];
     [self log:@""];
 
     [self runPrivilegeChecks];
 
     [self log:@""];
-    [self log:@"Existing baseline: ordinary H.264 encoding."];
+    [self log:@"Running initial codec reachability checks."];
+    [self runEncoderReachabilityChecks];
+
+    [self log:@""];
+    [self log:@"Existing H.264 encoding baseline is available."];
     [self log:@"Ready."];
 }
+
+#pragma mark - Logging
 
 - (void)log:(NSString *)message {
     if (!NSThread.isMainThread) {
@@ -190,9 +200,10 @@ static void OutputCallback(void *refCon,
                reportsRoot ? @"YES" : @"NO"]];
 
     /*
-     * This test only attempts to open the root directory.
-     * It does not list the directory or read any files.
+     * Read-only access check.
+     * The app does not enumerate or read files from this directory.
      */
+
     errno = 0;
 
     int directoryFD = open(
@@ -202,9 +213,7 @@ static void OutputCallback(void *refCon,
 
     if (directoryFD >= 0) {
         [self log:@"Root directory open: SUCCESS"];
-
-        [self log:
-         @"WARNING: unexpected access; this alone does not prove root."];
+        [self log:@"This result alone does not establish root privileges."];
 
         close(directoryFD);
     } else {
@@ -226,7 +235,106 @@ static void OutputCallback(void *refCon,
     [self log:@"========== END PRIVILEGE CHECKS =========="];
 }
 
-#pragma mark - VideoToolbox baseline
+#pragma mark - Codec reachability diagnostics
+
+- (CMVideoCodecType)av1CodecType {
+    /*
+     * AV1 codec FourCC: 'av01'.
+     * Construct the value explicitly to avoid relying on SDK availability
+     * of a named AV1 codec constant.
+     */
+    return (CMVideoCodecType)(
+        ((uint32_t)'a' << 24) |
+        ((uint32_t)'v' << 16) |
+        ((uint32_t)'0' << 8)  |
+        (uint32_t)'1'
+    );
+}
+
+- (void)runEncoderReachabilityChecks {
+    [self log:@"========== ENCODER REACHABILITY =========="];
+
+    [self log:@"Querying public VideoToolbox capabilities."];
+    [self log:@"Session probes use 64x64 dimensions and encode no frames."];
+
+    struct CodecProbe {
+        const char *name;
+        CMVideoCodecType codec;
+    };
+
+    struct CodecProbe codecs[] = {
+        {
+            "H.264",
+            kCMVideoCodecType_H264
+        },
+        {
+            "HEVC",
+            kCMVideoCodecType_HEVC
+        },
+        {
+            "AV1",
+            [self av1CodecType]
+        }
+    };
+
+    NSUInteger codecCount = sizeof(codecs) / sizeof(codecs[0]);
+
+    for (NSUInteger i = 0; i < codecCount; i++) {
+        NSString *codecName =
+            [NSString stringWithUTF8String:codecs[i].name];
+
+        BOOL hardwareSupported =
+            VTIsHardwareEncodeSupported(codecs[i].codec);
+
+        [self log:[NSString stringWithFormat:
+                   @"[%@] Hardware encode supported: %@",
+                   codecName,
+                   hardwareSupported ? @"YES" : @"NO"]];
+
+        VTCompressionSessionRef probeSession = NULL;
+
+        OSStatus createStatus = VTCompressionSessionCreate(
+            kCFAllocatorDefault,
+            64,
+            64,
+            codecs[i].codec,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            &probeSession
+        );
+
+        [self log:[NSString stringWithFormat:
+                   @"[%@] Session creation status: %d",
+                   codecName,
+                   (int)createStatus]];
+
+        [self log:[NSString stringWithFormat:
+                   @"[%@] Session object: %@",
+                   codecName,
+                   probeSession != NULL ? @"created" : @"not created"]];
+
+        if (probeSession != NULL) {
+            VTCompressionSessionInvalidate(probeSession);
+            CFRelease(probeSession);
+
+            [self log:[NSString stringWithFormat:
+                       @"[%@] Probe session released.",
+                       codecName]];
+        }
+    }
+
+    [self log:@"Interpretation:"];
+    [self log:@"- Hardware support is a capability indicator."];
+    [self log:@"- Session creation indicates public API acceptance."];
+    [self log:@"- Neither result proves a kernel vulnerability was reached."];
+    [self log:@"- Unsupported codecs are recorded, not forced."];
+    [self log:@"========== END ENCODER REACHABILITY =========="];
+}
+
+#pragma mark - H.264 baseline
 
 - (void)runTest {
     if (self.running) {
@@ -245,6 +353,7 @@ static void OutputCallback(void *refCon,
     [self log:@"Starting diagnostic run."];
 
     [self runPrivilegeChecks];
+    [self runEncoderReachabilityChecks];
 
     [self log:@""];
     [self log:@"Starting ordinary H.264 encoding."];
@@ -285,7 +394,7 @@ static void OutputCallback(void *refCon,
     }
 
     [self log:[NSString stringWithFormat:
-               @"Session creation status: %d",
+               @"H.264 session creation status: %d",
                (int)status]];
 
     CFTypeRef hardwareValue = NULL;
@@ -412,6 +521,18 @@ static void OutputCallback(void *refCon,
         uint8_t *base = CVPixelBufferGetBaseAddress(pixel);
         size_t stride = CVPixelBufferGetBytesPerRow(pixel);
 
+        if (base == NULL || stride < (size_t)width * 4) {
+            CVPixelBufferUnlockBaseAddress(pixel, 0);
+            CVPixelBufferRelease(pixel);
+
+            [self log:[NSString stringWithFormat:
+                       @"Frame %d: invalid pixel-buffer layout.",
+                       i]];
+
+            stoppedEarly = YES;
+            break;
+        }
+
         for (int y = 0; y < height; y++) {
             uint8_t *row = base + (size_t)y * stride;
 
@@ -464,13 +585,15 @@ static void OutputCallback(void *refCon,
     CFRelease(session);
 
     NSString *result = [NSString stringWithFormat:
-                        @"Run finished. Frames submitted: %lu/%d. Early stop: %@.",
+                        @"H.264 run finished. Frames submitted: %lu/%d. Early stop: %@.",
                         (unsigned long)self.submittedFrames,
                         count,
                         stoppedEarly ? @"yes" : @"no"];
 
     [self finish:result];
 }
+
+#pragma mark - Completion
 
 - (void)finish:(NSString *)message {
     dispatch_async(dispatch_get_main_queue(), ^{
