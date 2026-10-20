@@ -22,40 +22,36 @@ static void OutputCallback(void *refCon,
                            OSStatus status,
                            VTEncodeInfoFlags flags,
                            CMSampleBufferRef sampleBuffer) {
+
+    /*
+     * Read callback arguments immediately.
+     * Do not capture an unretained CMSampleBufferRef in an
+     * asynchronous block.
+     */
+    BOOL hasSampleBuffer = (sampleBuffer != NULL);
+    int callbackStatus = (int)status;
+    unsigned int callbackFlags = (unsigned int)flags;
+
     ViewController *vc = (__bridge ViewController *)refCon;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (status != noErr) {
+        if (callbackStatus != noErr || !hasSampleBuffer) {
             vc.failedCallbacks++;
 
             [vc log:[NSString stringWithFormat:
-                     @"Callback error: status=%d flags=0x%x",
-                     (int)status, (unsigned int)flags]];
-            return;
-        }
-
-        if (sampleBuffer == NULL) {
-            vc.failedCallbacks++;
-            [vc log:@"Callback returned success but no sample buffer."];
+                     @"Encoding callback: status=%d, flags=0x%x, sampleBuffer=%@",
+                     callbackStatus,
+                     callbackFlags,
+                     hasSampleBuffer ? @"present" : @"NULL"]];
             return;
         }
 
         vc.successfulCallbacks++;
 
-        CMFormatDescriptionRef format =
-            CMSampleBufferGetFormatDescription(sampleBuffer);
-
-        FourCharCode codec =
-            format ? CMFormatDescriptionGetMediaSubType(format) : 0;
-
         [vc log:[NSString stringWithFormat:
-                 @"Output callback #%lu: status=0, flags=0x%x, codec=%c%c%c%c",
+                 @"Encoding callback #%lu: status=0, flags=0x%x",
                  (unsigned long)vc.successfulCallbacks,
-                 (unsigned int)flags,
-                 (char)((codec >> 24) & 0xff),
-                 (char)((codec >> 16) & 0xff),
-                 (char)((codec >> 8) & 0xff),
-                 (char)(codec & 0xff)]];
+                 callbackFlags]];
     });
 }
 
@@ -137,9 +133,8 @@ static void OutputCallback(void *refCon,
                @"Device identifier: %s",
                systemInfo.machine]];
 
-    [self log:
-     @"Test scope: ordinary H.264 encoding; no vulnerability trigger."];
-
+    [self log:@"Test: ordinary H.264 encoding."];
+    [self log:@"No deliberate vulnerability trigger is used."];
     [self log:@"Ready."];
 }
 
@@ -178,8 +173,7 @@ static void OutputCallback(void *refCon,
     [self log:@"Starting diagnostic run."];
     [self log:@"Codec: H.264"];
     [self log:@"Resolution: 640x480"];
-    [self log:@"Input frames: 60"];
-    [self log:@"Requested frame rate: 30 fps"];
+    [self log:@"Frames requested: 60"];
 
     dispatch_async(
         dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -218,11 +212,6 @@ static void OutputCallback(void *refCon,
                @"Session creation status: %d",
                (int)status]];
 
-    /*
-     * Query the hardware-encoder property.
-     * A successful query reports the property value exposed by
-     * VideoToolbox; it does not identify a particular kernel function.
-     */
     CFTypeRef hardwareValue = NULL;
 
     OSStatus hardwareStatus = VTSessionCopyProperty(
@@ -234,19 +223,16 @@ static void OutputCallback(void *refCon,
 
     if (hardwareStatus == noErr && hardwareValue != NULL) {
         if (CFGetTypeID(hardwareValue) == CFBooleanGetTypeID()) {
-            BOOL enabled = CFBooleanGetValue(
-                (CFBooleanRef)hardwareValue
-            );
+            BOOL enabled =
+                CFBooleanGetValue((CFBooleanRef)hardwareValue);
 
             [self log:[NSString stringWithFormat:
                        @"Hardware encoder property: %@",
                        enabled ? @"true" : @"false"]];
         } else {
             [self log:[NSString stringWithFormat:
-                       @"Hardware encoder property returned type: %@",
-                       (__bridge NSString *)
-                       CFCopyTypeIDDescription(
-                           CFGetTypeID(hardwareValue))]];
+                       @"Hardware encoder property returned CF type ID: %lu",
+                       (unsigned long)CFGetTypeID(hardwareValue)]];
         }
 
         CFRelease(hardwareValue);
@@ -296,6 +282,8 @@ static void OutputCallback(void *refCon,
         return;
     }
 
+    BOOL stoppedEarly = NO;
+
     for (int i = 0; i < count; i++) {
         CVPixelBufferRef pixel = NULL;
 
@@ -328,6 +316,7 @@ static void OutputCallback(void *refCon,
                 CVPixelBufferRelease(pixel);
             }
 
+            stoppedEarly = YES;
             break;
         }
 
@@ -340,6 +329,7 @@ static void OutputCallback(void *refCon,
                        i, (int)lockStatus]];
 
             CVPixelBufferRelease(pixel);
+            stoppedEarly = YES;
             break;
         }
 
@@ -361,13 +351,12 @@ static void OutputCallback(void *refCon,
 
         CVPixelBufferUnlockBaseAddress(pixel, 0);
 
-        CMTime presentationTime = CMTimeMake(i, 30);
         VTEncodeInfoFlags flags = 0;
 
         status = VTCompressionSessionEncodeFrame(
             session,
             pixel,
-            presentationTime,
+            CMTimeMake(i, 30),
             kCMTimeInvalid,
             NULL,
             NULL,
@@ -380,6 +369,8 @@ static void OutputCallback(void *refCon,
             [self log:[NSString stringWithFormat:
                        @"Frame %d submission failed: %d",
                        i, (int)status]];
+
+            stoppedEarly = YES;
             break;
         }
 
@@ -396,10 +387,13 @@ static void OutputCallback(void *refCon,
     VTCompressionSessionInvalidate(session);
     CFRelease(session);
 
-    [self finish:[NSString stringWithFormat:
-                  @"Run finished. Frames submitted: %lu/%d.",
-                  (unsigned long)self.submittedFrames,
-                  count]];
+    NSString *result = [NSString stringWithFormat:
+                        @"Run finished. Frames submitted: %lu/%d. Early stop: %@.",
+                        (unsigned long)self.submittedFrames,
+                        count,
+                        stoppedEarly ? @"yes" : @"no"];
+
+    [self finish:result];
 }
 
 - (void)finish:(NSString *)message {
@@ -415,6 +409,7 @@ static void OutputCallback(void *refCon,
                    (unsigned long)self.failedCallbacks]];
 
         [self log:@"Diagnostic run complete."];
+
         self.running = NO;
         self.runButton.enabled = YES;
     });
