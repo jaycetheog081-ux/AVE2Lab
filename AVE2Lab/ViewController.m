@@ -3,6 +3,10 @@
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <sys/utsname.h>
+#import <unistd.h>
+#import <fcntl.h>
+#import <errno.h>
+#import <string.h>
 
 @interface ViewController ()
 
@@ -23,11 +27,6 @@ static void OutputCallback(void *refCon,
                            VTEncodeInfoFlags flags,
                            CMSampleBufferRef sampleBuffer) {
 
-    /*
-     * Read callback arguments immediately.
-     * Do not capture an unretained CMSampleBufferRef in an
-     * asynchronous block.
-     */
     BOOL hasSampleBuffer = (sampleBuffer != NULL);
     int callbackStatus = (int)status;
     unsigned int callbackFlags = (unsigned int)flags;
@@ -66,7 +65,7 @@ static void OutputCallback(void *refCon,
     self.runButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.runButton.translatesAutoresizingMaskIntoConstraints = NO;
 
-    [self.runButton setTitle:@"Run VideoToolbox Diagnostics"
+    [self.runButton setTitle:@"Run Privilege + Encoder Tests"
                     forState:UIControlStateNormal];
 
     self.runButton.titleLabel.font =
@@ -124,7 +123,7 @@ static void OutputCallback(void *refCon,
     struct utsname systemInfo;
     uname(&systemInfo);
 
-    [self log:@"AVE2Lab diagnostic build"];
+    [self log:@"AVE2Lab privilege diagnostic build"];
     [self log:[NSString stringWithFormat:
                @"OS: %@",
                NSProcessInfo.processInfo.operatingSystemVersionString]];
@@ -133,8 +132,13 @@ static void OutputCallback(void *refCon,
                @"Device identifier: %s",
                systemInfo.machine]];
 
-    [self log:@"Test: ordinary H.264 encoding."];
-    [self log:@"No deliberate vulnerability trigger is used."];
+    [self log:@"Read-only privilege checks; no exploit attempted."];
+    [self log:@""];
+
+    [self runPrivilegeChecks];
+
+    [self log:@""];
+    [self log:@"Existing baseline: ordinary H.264 encoding."];
     [self log:@"Ready."];
 }
 
@@ -157,6 +161,73 @@ static void OutputCallback(void *refCon,
     NSLog(@"[AVE2Lab] %@", message);
 }
 
+#pragma mark - Read-only privilege diagnostics
+
+- (void)runPrivilegeChecks {
+    [self log:@"========== PRIVILEGE CHECKS =========="];
+
+    uid_t realUID = getuid();
+    uid_t effectiveUID = geteuid();
+    gid_t realGID = getgid();
+    gid_t effectiveGID = getegid();
+
+    [self log:[NSString stringWithFormat:
+               @"Real UID: %u", (unsigned int)realUID]];
+
+    [self log:[NSString stringWithFormat:
+               @"Effective UID: %u", (unsigned int)effectiveUID]];
+
+    [self log:[NSString stringWithFormat:
+               @"Real GID: %u", (unsigned int)realGID]];
+
+    [self log:[NSString stringWithFormat:
+               @"Effective GID: %u", (unsigned int)effectiveGID]];
+
+    BOOL reportsRoot = (effectiveUID == 0);
+
+    [self log:[NSString stringWithFormat:
+               @"Process reports effective UID 0: %@",
+               reportsRoot ? @"YES" : @"NO"]];
+
+    /*
+     * This test only attempts to open the root directory.
+     * It does not list the directory or read any files.
+     */
+    errno = 0;
+
+    int directoryFD = open(
+        "/private/var/root",
+        O_RDONLY | O_DIRECTORY
+    );
+
+    if (directoryFD >= 0) {
+        [self log:@"Root directory open: SUCCESS"];
+
+        [self log:
+         @"WARNING: unexpected access; this alone does not prove root."];
+
+        close(directoryFD);
+    } else {
+        int openError = errno;
+
+        [self log:[NSString stringWithFormat:
+                   @"Root directory open: FAILED (errno=%d: %s)",
+                   openError,
+                   strerror(openError)]];
+
+        if (openError == EACCES || openError == EPERM) {
+            [self log:
+             @"Access denied, consistent with ordinary sandbox restrictions."];
+        }
+    }
+
+    [self log:@"No files were read or modified."];
+    [self log:@"No privilege escalation was attempted."];
+    [self log:@"========== END PRIVILEGE CHECKS =========="];
+}
+
+#pragma mark - VideoToolbox baseline
+
 - (void)runTest {
     if (self.running) {
         return;
@@ -169,9 +240,14 @@ static void OutputCallback(void *refCon,
     self.successfulCallbacks = 0;
     self.failedCallbacks = 0;
 
+    [self log:@""];
     [self log:@"----------------------------------------"];
     [self log:@"Starting diagnostic run."];
-    [self log:@"Codec: H.264"];
+
+    [self runPrivilegeChecks];
+
+    [self log:@""];
+    [self log:@"Starting ordinary H.264 encoding."];
     [self log:@"Resolution: 640x480"];
     [self log:@"Frames requested: 60"];
 
